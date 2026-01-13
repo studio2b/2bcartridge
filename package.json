@@ -1,0 +1,12 @@
+{
+  "name": "sqlite-editor",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": ">=32.0.0",
+    "express": ">=4.19.0"
+  }
+}

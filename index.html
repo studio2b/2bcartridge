@@ -1,20 +1,265 @@
 <!DOCTYPE html>
-<html>
+<html lang="ko">
 <head>
-    <meta charset="utf-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Home</title>
-    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
-    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/pretendard.min.css" />
-    <link rel="stylesheet" href="style.css">
-    <script type="module" src="app.js"></script>
+    <meta charset="UTF-8">
+    <title>SQLite3 RESTful Editor</title>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --sidebar-bg: #f5f5f5;
+            --border-color: #ccc;
+            --toolbar-bg: #333;
+            --log-bg: #1e1e1e;
+            --log-text: #00ff00;
+        }
+
+        body { display: flex; flex-direction: column; margin: 0; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+        
+        /* 상단 툴바 */
+        #toolbar { padding: 10px 15px; background: var(--toolbar-bg); color: white; display: flex; gap: 15px; align-items: center; z-index: 10; }
+        #toolbar input[type="number"] { width: 70px; padding: 4px; border-radius: 4px; border: none; }
+        #toolbar button { padding: 5px 15px; cursor: pointer; border-radius: 4px; border: none; background: #555; color: white; font-weight: bold; }
+        #toolbar button:hover { background: #777; }
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; background: #666; transition: 0.3s; }
+        .status-online { background: #00ff00; box-shadow: 0 0 8px #00ff00; }
+
+        /* 메인 컨테이너 */
+        #main-container { display: flex; flex: 1; overflow: hidden; }
+        
+        /* 사이드바 */
+        #sidebar { width: 260px; border-right: 1px solid var(--border-color); overflow-y: auto; background: var(--sidebar-bg); display: flex; flex-direction: column; }
+        #drop-zone { height: 60px; border: 2px dashed #aaa; margin: 10px; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 13px; color: #666; transition: 0.3s; cursor: pointer; }
+        #drop-zone.drag-over { background: #eef; border-color: #007bff; }
+        .table-item { padding: 12px 15px; cursor: pointer; border-bottom: 1px solid #ddd; font-size: 14px; }
+        .table-item:hover { background: #e8e8e8; }
+        .table-item small { display: block; color: #888; margin-top: 2px; }
+
+        /* 메인 콘텐츠 영역 */
+        #content { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+        #grid-container { flex: 1; overflow: auto; background: white; }
+        
+        /* 데이터 테이블 스타일 */
+        table { border-collapse: collapse; width: 100%; table-layout: auto; }
+        th { position: sticky; top: 0; background: #eee; z-index: 5; font-size: 13px; text-align: left; border: 1px solid var(--border-color); padding: 10px; }
+        td { border: 1px solid var(--border-color); padding: 8px; min-width: 120px; font-size: 14px; outline: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        td:focus { background: #f0f7ff; box-shadow: inset 0 0 0 2px #007bff; }
+        tr:hover { background: #f9f9f9; }
+
+        /* 로그 창 */
+        #log-container { height: 160px; background: var(--log-bg); color: var(--log-text); overflow-y: auto; padding: 10px; font-family: 'Courier New', monospace; font-size: 12px; border-top: 2px solid #444; }
+        .log-entry { margin-bottom: 5px; line-height: 1.4; border-bottom: 1px solid #333; padding-bottom: 2px; }
+        .status-200 { color: #00ff00; }
+        .status-error { color: #ff4444; }
+        .log-sys { color: #aaa; }
+    </style>
 </head>
 <body>
-    <h1>Table</h1>
-    <article>
-        <h2>Table</h2>
-        <div class="XF_table"></div>
-    </article>
+
+    <div id="toolbar">
+        <strong>🌐 API SERVER</strong>
+        <label for="server-port">Port:</label>
+        <input type="number" id="server-port" value="8080">
+        <button id="server-toggle">Start Server</button>
+        <div id="status-bulb" class="status-indicator"></div>
+        <span id="server-info" style="font-size: 12px; color: #aaa; margin-left: auto;">External: http://0.0.0.0:[Port]</span>
+    </div>
+
+    <div id="main-container">
+        <div id="sidebar">
+            <div id="drop-zone">SQLite 파일을<br>여기에 드래그하세요</div>
+            <div id="table-list"></div>
+        </div>
+        
+        <div id="content">
+            <div id="grid-container">
+                <table id="data-table">
+                    <thead></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <div id="log-container">
+                <div class="log-sys">-- 서버 로그가 여기에 표시됩니다 --</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTable = '';
+        let currentTableType = '';
+        let offset = 0;
+        const LIMIT = 1000;
+        let isLoading = false;
+        let isServerRunning = false;
+
+        const dropZone = document.getElementById('drop-zone');
+        const tableList = document.getElementById('table-list');
+        const gridContainer = document.getElementById('grid-container');
+        const dataTable = document.getElementById('data-table');
+        const serverToggleBtn = document.getElementById('server-toggle');
+        const serverPortInput = document.getElementById('server-port');
+        const statusBulb = document.getElementById('status-bulb');
+        const logContainer = document.getElementById('log-container');
+
+        // --- [1] 드래그 앤 드롭 및 DB 로드 ---
+        ['dragover', 'dragleave', 'drop'].forEach(evt => {
+            window.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
+        });
+
+        dropZone.addEventListener('dragover', () => dropZone.classList.add('drag-over'));
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+
+        dropZone.addEventListener('drop', async (e) => {
+            dropZone.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (!file) return;
+
+            const filePath = window.api.getFilePath(file);
+            const result = await window.api.openDB(filePath);
+            
+            if (result.success) {
+                dropZone.innerHTML = `<strong>연결됨</strong><br>${file.name}`;
+                renderTableList(result.tables);
+                addLogSystem(`데이터베이스 연결 성공: ${file.name}`);
+            } else {
+                alert("DB 로드 실패: " + result.error);
+            }
+        });
+
+        function renderTableList(tables) {
+            tableList.innerHTML = tables.map(t => `
+                <div class="table-item" onclick="loadTable('${t.name}', '${t.type}')">
+                    <strong>${t.name}</strong>
+                    <small>${t.type.toUpperCase()}</small>
+                </div>
+            `).join('');
+        }
+
+        async function loadTable(tableName, tableType) {
+            currentTable = tableName;
+            currentTableType = tableType;
+            offset = 0;
+            dataTable.querySelector('thead').innerHTML = '';
+            dataTable.querySelector('tbody').innerHTML = '';
+            await fetchMoreData();
+        }
+
+        async function fetchMoreData() {
+            if (isLoading || !currentTable) return;
+            isLoading = true;
+            
+            const data = await window.api.getData({ 
+                table: currentTable, 
+                offset, 
+                limit: LIMIT, 
+                type: currentTableType 
+            });
+
+            if (data.length > 0) {
+                if (offset === 0) renderHeader(data[0]);
+                renderRows(data);
+                offset += LIMIT;
+            }
+            isLoading = false;
+        }
+
+        function renderHeader(sampleRow) {
+            const cols = Object.keys(sampleRow).filter(k => k !== '_rowid_');
+            dataTable.querySelector('thead').innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
+        }
+
+        function renderRows(data) {
+            const tbody = dataTable.querySelector('tbody');
+            data.forEach(row => {
+                const tr = document.createElement('tr');
+                const rowid = row._rowid_;
+
+                Object.entries(row).forEach(([key, val]) => {
+                    if (key === '_rowid_') return;
+                    const td = document.createElement('td');
+                    td.innerText = val !== null ? val : '';
+                    td.dataset.column = key;
+                    td.tabIndex = 0; // 포커스 가능하게 설정
+
+                    // 테이블이고 rowid가 있는 경우만 수정 가능
+                    if (currentTableType === 'table' && rowid !== undefined) {
+                        td.contentEditable = true;
+                        td.onblur = async () => {
+                            const result = await window.api.updateCell({ 
+                                table: currentTable, rowid, column: key, value: td.innerText 
+                            });
+                            if (!result.success) {
+                                addLogSystem(`수정 에러: ${result.error}`);
+                                td.style.color = 'red';
+                            }
+                        };
+                    } else {
+                        td.style.background = "#f9f9f9";
+                    }
+
+                    td.onkeydown = handleNavigation;
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        // --- [2] 방향키 내비게이션 ---
+        function handleNavigation(e) {
+            const cell = e.target;
+            const row = cell.parentElement;
+            const colIndex = Array.from(row.children).indexOf(cell);
+            
+            switch(e.key) {
+                case 'ArrowRight': row.children[colIndex + 1]?.focus(); break;
+                case 'ArrowLeft':  row.children[colIndex - 1]?.focus(); break;
+                case 'ArrowDown':  row.nextElementSibling?.children[colIndex]?.focus(); break;
+                case 'ArrowUp':    row.previousElementSibling?.children[colIndex]?.focus(); break;
+            }
+        }
+
+        // --- [3] 무한 스크롤 ---
+        gridContainer.onscroll = () => {
+            if (gridContainer.scrollTop + gridContainer.clientHeight >= gridContainer.scrollHeight - 20) {
+                fetchMoreData();
+            }
+        };
+
+        // --- [4] API 서버 제어 ---
+        serverToggleBtn.onclick = async () => {
+            const port = parseInt(serverPortInput.value);
+            const targetState = !isServerRunning;
+            
+            const result = await window.api.toggleServer({ enabled: targetState, port });
+            
+            if (result.success) {
+                isServerRunning = targetState;
+                serverToggleBtn.innerText = isServerRunning ? "Stop Server" : "Start Server";
+                statusBulb.className = `status-indicator ${isServerRunning ? 'status-online' : ''}`;
+                serverPortInput.disabled = isServerRunning;
+                addLogSystem(`서버가 ${isServerRunning ? '시작되었습니다' : '중지되었습니다'} (Port: ${port})`);
+            } else {
+                alert("서버 시작 실패: " + result.error);
+            }
+        };
+
+        // --- [5] 로그 수신 및 표시 ---
+        window.api.onServerLog((log) => {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            const statusClass = log.status >= 400 ? 'status-error' : 'status-200';
+            div.innerHTML = `[${log.time}] <span class="${statusClass}">${log.method}</span> ${log.url} - <strong>${log.status}</strong>`;
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        });
+
+        function addLogSystem(msg) {
+            const div = document.createElement('div');
+            div.className = 'log-entry log-sys';
+            div.innerText = `[${new Date().toLocaleTimeString()}] SYS: ${msg}`;
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+    </script>
 </body>
 </html>
